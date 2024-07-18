@@ -537,7 +537,7 @@ impl From<ColumnDataDescription> for String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColumnDataType {
     Bit,
-    Bool,
+    Byte,
     Int,
     Float,
     Text,
@@ -553,7 +553,7 @@ impl From<ColumnDataType> for String {
 
         match orig {
             Bit => "X",
-            Bool => "B",
+            Byte => "B",
             Int => "J",
             Float => "E",
             Text | String => "A",
@@ -610,14 +610,13 @@ impl FromStr for ColumnDataDescription {
 
         let data_type = match data_type_char {
             'X' => ColumnDataType::Bit,
-            'B' => ColumnDataType::Bool,
+            'B' => ColumnDataType::Byte,
             'E' => ColumnDataType::Float,
             'J' => ColumnDataType::Int,
             'D' => ColumnDataType::Double,
             'I' => ColumnDataType::Short,
             'K' => ColumnDataType::Long,
             'A' => ColumnDataType::String,
-            'L' => ColumnDataType::Bool,
             _ => panic!(
                 "Have not implemented str -> ColumnDataType for {}",
                 data_type_char
