@@ -6,6 +6,7 @@ use crate::longnam::*;
 use crate::stringutils::status_to_string;
 use crate::types::DataType;
 use std::ffi;
+use std::mem::size_of;
 use std::ops::Range;
 use std::ptr;
 use std::str::FromStr;
@@ -57,7 +58,6 @@ macro_rules! reads_col_impl {
                         ..
                     }) => {
                         let num_output_rows = range.end - range.start;
-                        let mut out = vec![$nullval; num_output_rows];
                         let test_name = name.into();
                         let column_number = column_descriptions
                             .iter()
@@ -66,6 +66,13 @@ macro_rules! reads_col_impl {
                                 "Cannot find column {:?}",
                                 test_name
                             )))?;
+                        let col_desc = &column_descriptions[column_number];
+                        let repeat = if col_desc.data_type.typ == ColumnDataType::Bit {
+                            col_desc.data_type.repeat / (size_of::<$t>() * 8)
+                        } else {
+                            col_desc.data_type.repeat
+                        };
+                        let mut out = vec![$nullval; num_output_rows * repeat];
                         let mut status = 0;
                         unsafe {
                             $func(
@@ -73,7 +80,7 @@ macro_rules! reads_col_impl {
                                 (column_number + 1) as i32,
                                 (range.start + 1) as i64,
                                 1,
-                                num_output_rows as _,
+                                (num_output_rows * repeat) as _,
                                 $nullval,
                                 out.as_mut_ptr(),
                                 ptr::null_mut(),
@@ -119,6 +126,12 @@ macro_rules! reads_col_impl {
                                 "Cannot find column {:?}",
                                 test_name
                             )))?;
+                        let repeat = column_descriptions[column_number].data_type.repeat;
+                        if repeat > 1 {
+                            unimplemented!(
+                                "reading a single cell of a vector value (e.g., TFORM1 = 100E) is unimplemented. Call read_col() or read_col_range()."
+                            )
+                        }
                         let mut status = 0;
 
                         unsafe {
@@ -145,20 +158,83 @@ macro_rules! reads_col_impl {
     };
 }
 
+reads_col_impl!(u8, fits_read_col_byt, 0);
+reads_col_impl!(i8, fits_read_col_sbyt, 0);
 reads_col_impl!(i16, fits_read_col_sht, 0);
 reads_col_impl!(u16, fits_read_col_usht, 0);
 reads_col_impl!(i32, fits_read_col_int, 0);
 reads_col_impl!(u32, fits_read_col_uint, 0);
+reads_col_impl!(i64, fits_read_col_lnglng, 0);
+reads_col_impl!(u64, fits_read_col_ulnglng, 0);
 reads_col_impl!(f32, fits_read_col_flt, 0.0);
 reads_col_impl!(f64, fits_read_col_dbl, 0.0);
-#[cfg(all(target_pointer_width = "64", not(target_os = "windows")))]
-reads_col_impl!(i64, fits_read_col_lng, 0);
-#[cfg(any(target_pointer_width = "32", target_os = "windows"))]
-reads_col_impl!(i64, fits_read_col_lnglng, 0);
-#[cfg(all(target_pointer_width = "64", not(target_os = "windows")))]
-reads_col_impl!(u64, fits_read_col_ulng, 0);
-#[cfg(any(target_pointer_width = "32", target_os = "windows"))]
-reads_col_impl!(u64, fits_read_col_ulnglng, 0);
+
+impl ReadsCol for bool {
+    fn read_col_range<T: Into<String>>(
+        fits_file: &mut FitsFile,
+        name: T,
+        range: &Range<usize>,
+    ) -> Result<Vec<Self>> {
+        match fits_file.fetch_hdu_info() {
+            Ok(HduInfo::TableInfo {
+                column_descriptions,
+                ..
+            }) => {
+                let num_output_rows = range.end - range.start;
+                let test_name = name.into();
+                let column_number = column_descriptions
+                    .iter()
+                    .position(|ref desc| desc.name == test_name)
+                    .ok_or(Error::Message(format!(
+                        "Cannot find column {:?}",
+                        test_name
+                    )))?;
+                let col_desc = &column_descriptions[column_number];
+                let repeat = col_desc.data_type.repeat;
+                let num_bits = num_output_rows * repeat;
+
+                let mut out = vec![false; num_bits];
+                let mut status = 0;
+                unsafe {
+                    fits_read_col_bit(
+                        fits_file.fptr.as_mut() as *mut _,
+                        (column_number + 1) as i32,
+                        (range.start + 1) as i64,
+                        1,
+                        num_bits as _,
+                        out.as_mut_ptr() as *mut c_char,
+                        &mut status,
+                    );
+                }
+
+                match status {
+                    0 => Ok(out),
+                    307 => Err(IndexError {
+                        message: "given indices out of range".to_string(),
+                        given: range.clone(),
+                    }
+                    .into()),
+                    e => Err(FitsError {
+                        status: e,
+                        message: status_to_string(e).unwrap().unwrap(),
+                    }
+                    .into()),
+                }
+            }
+            Err(e) => Err(e),
+            _ => panic!("Unknown error occurred"),
+        }
+    }
+
+    fn read_cell_value<T>(fits_file: &mut FitsFile, name: T, idx: usize) -> Result<Self>
+    where
+        T: Into<String>,
+        Self: Sized,
+    {
+        // XXX Ineffient but works
+        Self::read_col_range(fits_file, name, &(idx..idx + 1)).map(|v| v[0].clone())
+    }
+}
 
 impl ReadsCol for String {
     fn read_col_range<T: Into<String>>(
@@ -257,7 +333,8 @@ pub trait WritesCol {
     {
         match fits_file.fetch_hdu_info() {
             Ok(HduInfo::TableInfo { .. }) => {
-                let row_range = 0..col_data.len();
+                let num_rows = col_data.len();
+                let row_range = 0..num_rows;
                 Self::write_col_range(fits_file, hdu, col_name, col_data, &row_range)
             }
             Ok(HduInfo::ImageInfo { .. }) => Err("Cannot write column data to FITS image".into()),
@@ -284,7 +361,7 @@ macro_rules! writes_col_impl {
                         let colno = hdu.get_column_no(fits_file, col_name.into())?;
                         // TODO: check that the column exists in the file
                         let mut status = 0;
-                        let n_elements = rows.end - rows.start;
+                        let n_rows = rows.end - rows.start;
                         unsafe {
                             fits_write_col(
                                 fits_file.fptr.as_mut() as *mut _,
@@ -292,7 +369,7 @@ macro_rules! writes_col_impl {
                                 (colno + 1) as _,
                                 (rows.start + 1) as _,
                                 1,
-                                n_elements as _,
+                                n_rows as _,
                                 col_data.as_ptr() as *mut _,
                                 &mut status,
                             );
@@ -312,18 +389,56 @@ macro_rules! writes_col_impl {
     };
 }
 
-writes_col_impl!(u32, DataType::TUINT);
-#[cfg(all(target_pointer_width = "64", not(target_os = "windows")))]
-writes_col_impl!(u64, DataType::TULONG);
-#[cfg(any(target_pointer_width = "32", target_os = "windows"))]
-writes_col_impl!(u64, DataType::TLONGLONG);
+writes_col_impl!(u8, DataType::TBYTE);
+writes_col_impl!(i8, DataType::TSBYTE);
 writes_col_impl!(i32, DataType::TINT);
-#[cfg(all(target_pointer_width = "64", not(target_os = "windows")))]
-writes_col_impl!(i64, DataType::TLONG);
-#[cfg(any(target_pointer_width = "32", target_os = "windows"))]
+writes_col_impl!(u32, DataType::TUINT);
 writes_col_impl!(i64, DataType::TLONGLONG);
+writes_col_impl!(u64, DataType::TULONGLONG);
 writes_col_impl!(f32, DataType::TFLOAT);
 writes_col_impl!(f64, DataType::TDOUBLE);
+
+impl WritesCol for bool {
+    fn write_col_range<T: Into<String>>(
+        fits_file: &mut FitsFile,
+        hdu: &FitsHdu,
+        col_name: T,
+        col_data: &[Self],
+        rows: &Range<usize>,
+    ) -> Result<FitsHdu> {
+        match fits_file.fetch_hdu_info() {
+            Ok(HduInfo::TableInfo {
+                column_descriptions,
+                ..
+            }) => {
+                let colno = hdu.get_column_no(fits_file, col_name.into())?;
+                // TODO: check that the column exists in the file
+                let col_desc = &column_descriptions[colno];
+                let repeat = col_desc.data_type.repeat;
+                let num_bits = (rows.end - rows.start) * repeat;
+
+                let mut status = 0;
+                unsafe {
+                    fits_write_col_bit(
+                        fits_file.fptr.as_mut() as *mut _,
+                        (colno + 1) as _,
+                        (rows.start + 1) as _,
+                        1,
+                        num_bits as _,
+                        col_data.as_ptr() as *mut _,
+                        &mut status as *mut _,
+                    );
+                }
+                check_status(status).and_then(|_| fits_file.current_hdu())
+            }
+            Ok(HduInfo::ImageInfo { .. }) => Err("Cannot write column data to FITS image".into()),
+            Ok(HduInfo::AnyInfo { .. }) => {
+                Err("Cannot determine HDU type, so cannot write column data".into())
+            }
+            Err(e) => Err(e),
+        }
+    }
+}
 
 impl WritesCol for String {
     fn write_col_range<T: Into<String>>(
@@ -538,12 +653,17 @@ impl From<ColumnDataDescription> for String {
 pub enum ColumnDataType {
     Bit,
     Byte,
+    SignedByte,
+    Short,
+    UnsignedShort,
     Int,
+    Long,
+    UnsignedLong,
     Float,
     Text,
     Double,
-    Short,
-    Long,
+    LongLong,
+    UnsignedLongLong,
     String,
 }
 
@@ -554,12 +674,16 @@ impl From<ColumnDataType> for String {
         match orig {
             Bit => "X",
             Byte => "B",
-            Int => "J",
+            SignedByte => "S",
+            Short => "I",
+            UnsignedShort => "U",
+            Int | Long => "J",
+            UnsignedLong => "U",
             Float => "E",
             Text | String => "A",
             Double => "D",
-            Short => "I",
-            Long => "K",
+            LongLong => "K",
+            UnsignedLongLong => "W",
         }
         .to_string()
     }
@@ -611,12 +735,16 @@ impl FromStr for ColumnDataDescription {
         let data_type = match data_type_char {
             'X' => ColumnDataType::Bit,
             'B' => ColumnDataType::Byte,
+            'S' => ColumnDataType::SignedByte,
             'E' => ColumnDataType::Float,
             'J' => ColumnDataType::Int,
             'D' => ColumnDataType::Double,
             'I' => ColumnDataType::Short,
-            'K' => ColumnDataType::Long,
+            'K' => ColumnDataType::LongLong,
             'A' => ColumnDataType::String,
+            'U' => ColumnDataType::UnsignedShort,
+            'V' => ColumnDataType::UnsignedLong,
+            'W' => ColumnDataType::UnsignedLongLong,
             _ => panic!(
                 "Have not implemented str -> ColumnDataType for {}",
                 data_type_char
@@ -668,8 +796,9 @@ macro_rules! datatype_into_impl {
                     DataType::TINT => 31,
                     DataType::TULONG => 40,
                     DataType::TLONG => 41,
-                    DataType::TLONGLONG => 81,
                     DataType::TFLOAT => 42,
+                    DataType::TULONGLONG => 80,
+                    DataType::TLONGLONG => 81,
                     DataType::TDOUBLE => 82,
                     DataType::TCOMPLEX => 83,
                     DataType::TDBLCOMPLEX => 163,

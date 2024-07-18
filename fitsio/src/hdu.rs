@@ -761,7 +761,7 @@ impl FitsHdu {
     # }
     ```
     */
-    pub fn write_col_range<T: WritesCol, N: Into<String>>(
+    pub fn write_col_range<T: WritesCol, N: Into<String> + Clone>(
         &self,
         fits_file: &mut FitsFile,
         name: N,
@@ -807,7 +807,7 @@ impl FitsHdu {
     # }
     ```
     */
-    pub fn write_col<T: WritesCol, N: Into<String>>(
+    pub fn write_col<T: WritesCol, N: Into<String> + Clone>(
         &self,
         fits_file: &mut FitsFile,
         name: N,
