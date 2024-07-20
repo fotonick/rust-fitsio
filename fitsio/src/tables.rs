@@ -67,6 +67,7 @@ macro_rules! reads_col_impl {
                                 test_name
                             )))?;
                         let col_desc = &column_descriptions[column_number];
+                        #[allow(clippy::manual_bits)]
                         let repeat = if col_desc.data_type.typ == ColumnDataType::Bit {
                             col_desc.data_type.repeat / (size_of::<$t>() * 8)
                         } else {
