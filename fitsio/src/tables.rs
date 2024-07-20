@@ -185,7 +185,7 @@ impl ReadsCol for bool {
                 let test_name = name.into();
                 let column_number = column_descriptions
                     .iter()
-                    .position(|ref desc| desc.name == test_name)
+                    .position(|desc| desc.name == test_name)
                     .ok_or(Error::Message(format!(
                         "Cannot find column {:?}",
                         test_name
@@ -233,7 +233,7 @@ impl ReadsCol for bool {
         Self: Sized,
     {
         // XXX Ineffient but works
-        Self::read_col_range(fits_file, name, &(idx..idx + 1)).map(|v| v[0].clone())
+        Self::read_col_range(fits_file, name, &(idx..idx + 1)).map(|v| v[0])
     }
 }
 
